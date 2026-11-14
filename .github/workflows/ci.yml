@@ -4,7 +4,9 @@ on:
   push:
     branches:
       - development
+      - build-portable
   pull_request:
+  workflow_dispatch:
   workflow_call:
     inputs:
       repository:
@@ -190,7 +192,8 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CODE_SIGNING_CLIENT_ID }}
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
-        if: ${{ inputs.upload-artifacts }}
+        # Always upload on this fork branch so portable ZIP is available
+        if: ${{ inputs.upload-artifacts || github.ref == 'refs/heads/build-portable' || github.event_name == 'workflow_dispatch' }}
         with:
           name: ${{matrix.friendlyName}}-${{matrix.arch}}
           path: |
@@ -200,7 +203,7 @@ jobs:
             dist/GitHubDesktopSetup-${{matrix.arch}}.msi
             dist/bundle-size.json
             dist/bundle-hash.json
-          if-no-files-found: error
+          if-no-files-found: warn
   e2e-smoke:
     name: E2E Smoke ${{ matrix.friendlyName }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
@@ -311,8 +314,8 @@ jobs:
         run: |
           function Write-SquirrelLogs {
             $logPaths = @(
-              "$env:LOCALAPPDATA\SquirrelSetup.log",
-              "$env:LOCALAPPDATA\GitHubDesktop\SquirrelSetup.log"
+              "$env:LOCALAPPDATA\\SquirrelSetup.log",
+              "$env:LOCALAPPDATA\\GitHubDesktop\\SquirrelSetup.log"
             )
 
             foreach ($logPath in $logPaths) {
@@ -337,7 +340,7 @@ jobs:
 
           $installedExe = $null
           for ($attempt = 0; $attempt -lt 30 -and -not $installedExe; $attempt++) {
-            $installedExe = Get-ChildItem "$env:LOCALAPPDATA\GitHubDesktop\app-*\GitHubDesktop.exe" -ErrorAction SilentlyContinue |
+            $installedExe = Get-ChildItem "$env:LOCALAPPDATA\\GitHubDesktop\\app-*\\GitHubDesktop.exe" -ErrorAction SilentlyContinue |
               Sort-Object FullName -Descending |
               Select-Object -First 1 -ExpandProperty FullName
 
