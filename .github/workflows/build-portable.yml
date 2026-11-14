@@ -12,7 +12,7 @@ on:
       - 'package-lock.json'
   workflow_dispatch:
 
-# Lean CI: only build Windows portable ZIP (no installers, no macOS, no e2e).
+# Lean CI: only build Windows portable app folder (no installers, no nested zip).
 env:
   NODE_VERSION: '24.22.1'
 
@@ -45,37 +45,29 @@ jobs:
           DESKTOP_OAUTH_CLIENT_ID: ${{ secrets.DESKTOP_OAUTH_CLIENT_ID }}
           DESKTOP_OAUTH_CLIENT_SECRET: ${{ secrets.DESKTOP_OAUTH_CLIENT_SECRET }}
 
-      - name: Create portable ZIP from unpacked app
+      - name: Verify unpacked app
         shell: pwsh
         run: |
-          $arch = '${{ matrix.arch }}'
-          $src = Join-Path 'dist' "GitHubDesktop-win32-$arch"
-          $zip = Join-Path 'dist' "GitHubDesktop-portable-$arch.zip"
-
+          $src = "dist\GitHubDesktop-win32-${{ matrix.arch }}"
           if (-not (Test-Path $src)) {
             Write-Host 'dist contents:'
             Get-ChildItem -Path dist -ErrorAction SilentlyContinue | Format-Table Name, Length
             throw "Unpacked app directory not found: $src"
           }
-
-          Write-Host "Packing $src -> $zip"
-          if (Test-Path $zip) { Remove-Item -Force $zip }
-
-          # tar -a produces a .zip on Windows; more reliable than Compress-Archive for large trees
-          tar -a -c -f $zip -C $src .
-
-          if (-not (Test-Path $zip)) {
-            throw "Failed to create $zip"
+          Write-Host "Contents of $src (first 25):"
+          Get-ChildItem $src | Select-Object -First 25 | Format-Table Name, Length
+          $exe = Join-Path $src 'GitHubDesktop.exe'
+          if (-not (Test-Path $exe)) {
+            throw "GitHubDesktop.exe not found in $src"
           }
+          Write-Host "OK: $exe"
 
-          Get-Item $zip | Format-List FullName, Length
-          Write-Host 'Top-level entries in zip (first 30):'
-          tar -tf $zip | Select-Object -First 30
-
-      - name: Upload portable ZIP
+      # Upload the app directory itself. GitHub packs it once on download,
+      # so the user gets a single zip with GitHubDesktop.exe at the top level.
+      - name: Upload portable app
         uses: actions/upload-artifact@v7
         with:
           name: GitHubDesktop-portable-${{ matrix.arch }}
-          path: dist/GitHubDesktop-portable-${{ matrix.arch }}.zip
+          path: dist/GitHubDesktop-win32-${{ matrix.arch }}/
           if-no-files-found: error
           retention-days: 14

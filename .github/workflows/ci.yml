@@ -4,9 +4,7 @@ on:
   push:
     branches:
       - development
-      - build-portable
   pull_request:
-  workflow_dispatch:
   workflow_call:
     inputs:
       repository:
@@ -192,8 +190,7 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CODE_SIGNING_CLIENT_ID }}
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
-        # Always upload on this fork branch so portable ZIP is available
-        if: ${{ inputs.upload-artifacts || github.ref == 'refs/heads/build-portable' || github.event_name == 'workflow_dispatch' }}
+        if: ${{ inputs.upload-artifacts }}
         with:
           name: ${{matrix.friendlyName}}-${{matrix.arch}}
           path: |
@@ -203,7 +200,7 @@ jobs:
             dist/GitHubDesktopSetup-${{matrix.arch}}.msi
             dist/bundle-size.json
             dist/bundle-hash.json
-          if-no-files-found: warn
+          if-no-files-found: error
   e2e-smoke:
     name: E2E Smoke ${{ matrix.friendlyName }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
