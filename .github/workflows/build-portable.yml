@@ -1,0 +1,81 @@
+name: Build Portable
+
+on:
+  push:
+    branches:
+      - build-portable
+    paths:
+      - '.github/workflows/build-portable.yml'
+      - 'app/**'
+      - 'script/**'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+# Lean CI: only build Windows portable ZIP (no installers, no macOS, no e2e).
+env:
+  NODE_VERSION: '24.22.1'
+
+jobs:
+  portable-windows:
+    name: Windows ${{ matrix.arch }} portable
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-ci-environment
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          arch: ${{ matrix.arch }}
+
+      - name: Build production app
+        run: npm run build:prod
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          DESKTOP_OAUTH_CLIENT_ID: ${{ secrets.DESKTOP_OAUTH_CLIENT_ID }}
+          DESKTOP_OAUTH_CLIENT_SECRET: ${{ secrets.DESKTOP_OAUTH_CLIENT_SECRET }}
+
+      - name: Create portable ZIP from unpacked app
+        shell: pwsh
+        run: |
+          $arch = '${{ matrix.arch }}'
+          $src = Join-Path 'dist' "GitHubDesktop-win32-$arch"
+          $zip = Join-Path 'dist' "GitHubDesktop-portable-$arch.zip"
+
+          if (-not (Test-Path $src)) {
+            Write-Host 'dist contents:'
+            Get-ChildItem -Path dist -ErrorAction SilentlyContinue | Format-Table Name, Length
+            throw "Unpacked app directory not found: $src"
+          }
+
+          Write-Host "Packing $src -> $zip"
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+
+          # tar -a produces a .zip on Windows; more reliable than Compress-Archive for large trees
+          tar -a -c -f $zip -C $src .
+
+          if (-not (Test-Path $zip)) {
+            throw "Failed to create $zip"
+          }
+
+          Get-Item $zip | Format-List FullName, Length
+          Write-Host 'Top-level entries in zip (first 30):'
+          tar -tf $zip | Select-Object -First 30
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: GitHubDesktop-portable-${{ matrix.arch }}
+          path: dist/GitHubDesktop-portable-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 14
