@@ -12,13 +12,163 @@ on:
       - 'package-lock.json'
   workflow_dispatch:
 
-# Lean CI: only build Windows portable app folder (no installers, no nested zip).
 env:
   NODE_VERSION: '24.22.1'
 
+concurrency:
+  group: build-portable
+  cancel-in-progress: true
+
 jobs:
+  # Merge main (development) into this branch, then continue build on merged tree.
+  # Merge commit uses [skip ci] so the push does not start a second run.
+  sync:
+    name: Sync development
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      has_new_commits: ${{ steps.merge.outputs.has_new_commits }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: build-portable
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch development
+        run: git fetch origin development:refs/remotes/origin/development
+
+      - name: Collect commits to merge
+        id: commits
+        run: |
+          mkdir -p /tmp/portable-notes
+          RANGE='HEAD..origin/development'
+          COUNT=$(git rev-list --count $RANGE 2>/dev/null || echo 0)
+          echo "commits_ahead=$COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 提交详情（development → build-portable）"
+            echo ""
+            if [ "$COUNT" = "0" ]; then
+              echo "_本次无新的主分支提交（已与 development 同步）。_"
+              echo ""
+            else
+              echo "共 **${COUNT}** 个提交。"
+              echo ""
+
+              echo "### 新功能 (feat)"
+              git log $RANGE --pretty=format:'- %s (%h)' --grep='^feat' -i || true
+              echo ""
+              echo ""
+
+              echo "### 修复 (fix)"
+              git log $RANGE --pretty=format:'- %s (%h)' --grep='^fix' -i || true
+              echo ""
+              echo ""
+
+              echo "### 改进 (improve/refactor/perf)"
+              git log $RANGE --pretty=format:'- %s (%h)' --grep='^\(improv\|refactor\|perf\)' -i || true
+              echo ""
+              echo ""
+
+              echo "### 文档 / 杂项 (docs/chore/other)"
+              git log $RANGE --pretty=format:'- %s (%h)' --grep='^\(docs\|chore\|build\|ci\|test\|style\)' -i || true
+              echo ""
+              echo ""
+
+              echo "### 全部提交（时间倒序）"
+              git log $RANGE --pretty=format:'- %s (%h) — %an' 
+              echo ""
+            fi
+          } > /tmp/portable-notes/changelog.md
+
+          # Drop empty category sections (headers with no bullets)
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/portable-notes/changelog.md')
+          text = p.read_text(encoding='utf-8')
+          lines = text.splitlines()
+          out = []
+          i = 0
+          while i < len(lines):
+              line = lines[i]
+              if line.startswith('### '):
+                  block = [line]
+                  i += 1
+                  while i < len(lines) and not lines[i].startswith('### ') and not (lines[i].startswith('## ') and not lines[i].startswith('###')):
+                      block.append(lines[i])
+                      i += 1
+                  body = [b for b in block[1:] if b.strip() and b.strip() != '-']
+                  # keep section if any real bullet
+                  if any(b.strip().startswith('-') for b in body):
+                      out.extend(block)
+                      if out and out[-1] != '':
+                          out.append('')
+                  continue
+              out.append(line)
+              i += 1
+          p.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+          PY
+
+      - name: Merge development into build-portable
+        id: merge
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          BEFORE=$(git rev-parse HEAD)
+          if git merge-base --is-ancestor origin/development HEAD; then
+            echo "Already up to date with development."
+            echo "has_new_commits=false" >> "$GITHUB_OUTPUT"
+          else
+            git merge origin/development -m "sync: merge development into build-portable [skip ci]"
+            echo "has_new_commits=true" >> "$GITHUB_OUTPUT"
+          fi
+          AFTER=$(git rev-parse HEAD)
+          echo "before=$BEFORE"
+          echo "after=$AFTER"
+
+          if [ "$BEFORE" != "$AFTER" ]; then
+            git push origin HEAD:build-portable
+            echo "Pushed merge commit to build-portable."
+          else
+            echo "No push needed."
+          fi
+
+      - name: Read version / tag
+        id: meta
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('app/package.json'))['version'])")
+          TAG="portable-${VERSION}-b${{ github.run_number }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version=$VERSION Tag=$TAG"
+
+          {
+            echo "# GitHub Desktop Portable ${VERSION}"
+            echo ""
+            echo "- 分支: \`build-portable\`（已尝试合并 \`development\`）"
+            echo "- 运行: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "- 提交: \`$(git rev-parse --short HEAD)\`"
+            echo ""
+            echo "解压对应架构的 ZIP 后运行 \`GitHubDesktop.exe\`。"
+            echo ""
+            cat /tmp/portable-notes/changelog.md
+          } > /tmp/portable-notes/release-body.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portable-release-notes
+          path: /tmp/portable-notes/release-body.md
+          retention-days: 5
+
   portable-windows:
     name: Windows ${{ matrix.arch }} portable
+    needs: sync
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -30,6 +180,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: build-portable
           submodules: recursive
 
       - uses: ./.github/actions/setup-ci-environment
@@ -50,24 +201,71 @@ jobs:
         run: |
           $src = "dist\GitHubDesktop-win32-${{ matrix.arch }}"
           if (-not (Test-Path $src)) {
-            Write-Host 'dist contents:'
-            Get-ChildItem -Path dist -ErrorAction SilentlyContinue | Format-Table Name, Length
+            Get-ChildItem dist -ErrorAction SilentlyContinue | Format-Table Name
             throw "Unpacked app directory not found: $src"
           }
-          Write-Host "Contents of $src (first 25):"
-          Get-ChildItem $src | Select-Object -First 25 | Format-Table Name, Length
           $exe = Join-Path $src 'GitHubDesktop.exe'
-          if (-not (Test-Path $exe)) {
-            throw "GitHubDesktop.exe not found in $src"
-          }
+          if (-not (Test-Path $exe)) { throw "GitHubDesktop.exe not found in $src" }
           Write-Host "OK: $exe"
 
-      # Upload the app directory itself. GitHub packs it once on download,
-      # so the user gets a single zip with GitHubDesktop.exe at the top level.
-      - name: Upload portable app
+      # Artifact = folder (single zip on download, no nested zip)
+      - name: Upload portable app artifact
         uses: actions/upload-artifact@v7
         with:
           name: GitHubDesktop-portable-${{ matrix.arch }}
           path: dist/GitHubDesktop-win32-${{ matrix.arch }}/
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish release
+    needs: [sync, portable-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Pack release assets (one zip per arch)
+        run: |
+          set -euo pipefail
+          ls -laR artifacts
+          mkdir -p release-assets
+          for arch in x64 arm64; do
+            src="artifacts/GitHubDesktop-portable-${arch}"
+            if [ ! -d "$src" ]; then
+              echo "Missing $src"
+              continue
+            fi
+            # If artifact wrapper still has a single nested folder, flatten one level when needed
+            if [ ! -f "$src/GitHubDesktop.exe" ]; then
+              inner=$(find "$src" -maxdepth 2 -name GitHubDesktop.exe -printf '%h\n' | head -1 || true)
+              if [ -n "${inner:-}" ]; then src="$inner"; fi
+            fi
+            out="release-assets/GitHubDesktop-portable-${arch}.zip"
+            (cd "$src" && zip -r -q "$GITHUB_WORKSPACE/$out" .)
+            ls -lh "$out"
+          done
+          ls -la release-assets
+
+      - name: Download release notes
+        uses: actions/download-artifact@v7
+        with:
+          name: portable-release-notes
+          path: notes
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.sync.outputs.tag }}
+          name: Portable ${{ needs.sync.outputs.version }} (build ${{ github.run_number }})
+          body_path: notes/release-body.md
+          files: release-assets/*.zip
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
