@@ -30,6 +30,8 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      channel: ${{ steps.meta.outputs.channel }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
       has_new_commits: ${{ steps.merge.outputs.has_new_commits }}
     steps:
       - uses: actions/checkout@v7
@@ -81,7 +83,7 @@ jobs:
               echo ""
 
               echo "### 全部提交（时间倒序）"
-              git log $RANGE --pretty=format:'- %s (%h) — %an' 
+              git log $RANGE --pretty=format:'- %s (%h) — %an'
               echo ""
             fi
           } > /tmp/portable-notes/changelog.md
@@ -139,18 +141,38 @@ jobs:
             echo "No push needed."
           fi
 
-      - name: Read version / tag
+      - name: Read version / tag / channel
         id: meta
         run: |
+          # Channel rules mirror script/dist-info.ts (getChannelFromReleaseBranch / version):
+          #   version contains "test"  -> test
+          #   version contains "beta"  -> beta
+          #   otherwise               -> production
+          # Official draft-release.yml uses beta vs production; beta/test => GitHub pre-release.
           VERSION=$(python3 -c "import json; print(json.load(open('app/package.json'))['version'])")
+          VERSION_LC=$(echo "$VERSION" | tr '[:upper:]' '[:lower:]')
+          if echo "$VERSION_LC" | grep -q 'test'; then
+            CHANNEL=test
+            IS_PRERELEASE=true
+          elif echo "$VERSION_LC" | grep -q 'beta'; then
+            CHANNEL=beta
+            IS_PRERELEASE=true
+          else
+            CHANNEL=production
+            IS_PRERELEASE=false
+          fi
           TAG="portable-${VERSION}-b${{ github.run_number }}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Version=$VERSION Tag=$TAG"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Version=$VERSION Channel=$CHANNEL Prerelease=$IS_PRERELEASE Tag=$TAG"
 
           {
             echo "# GitHub Desktop Portable ${VERSION}"
             echo ""
+            echo "- 渠道: \`${CHANNEL}\`（与官方 dist-info / draft-release 规则一致）"
+            echo "- 发布类型: $([ \"$IS_PRERELEASE\" = true ] && echo 'Pre-release' || echo 'Release')"
             echo "- 分支: \`build-portable\`（已尝试合并 \`development\`）"
             echo "- 运行: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo "- 提交: \`$(git rev-parse --short HEAD)\`"
@@ -191,6 +213,8 @@ jobs:
       - name: Build production app
         run: npm run build:prod
         env:
+          # Align with official dist-info getChannel() / isPublishable channels
+          RELEASE_CHANNEL: ${{ needs.sync.outputs.channel }}
           npm_config_arch: ${{ matrix.arch }}
           TARGET_ARCH: ${{ matrix.arch }}
           DESKTOP_OAUTH_CLIENT_ID: ${{ secrets.DESKTOP_OAUTH_CLIENT_ID }}
@@ -199,7 +223,7 @@ jobs:
       - name: Verify unpacked app
         shell: pwsh
         run: |
-          $src = "dist\GitHubDesktop-win32-${{ matrix.arch }}"
+          $src = "dist\\GitHubDesktop-win32-${{ matrix.arch }}"
           if (-not (Test-Path $src)) {
             Get-ChildItem dist -ErrorAction SilentlyContinue | Format-Table Name
             throw "Unpacked app directory not found: $src"
@@ -242,7 +266,7 @@ jobs:
             fi
             # If artifact wrapper still has a single nested folder, flatten one level when needed
             if [ ! -f "$src/GitHubDesktop.exe" ]; then
-              inner=$(find "$src" -maxdepth 2 -name GitHubDesktop.exe -printf '%h\n' | head -1 || true)
+              inner=$(find "$src" -maxdepth 2 -name GitHubDesktop.exe -printf '%h\\n' | head -1 || true)
               if [ -n "${inner:-}" ]; then src="$inner"; fi
             fi
             out="release-assets/GitHubDesktop-portable-${arch}.zip"
@@ -261,11 +285,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.sync.outputs.tag }}
-          name: Portable ${{ needs.sync.outputs.version }} (build ${{ github.run_number }})
+          name: Portable ${{ needs.sync.outputs.version }} (${{ needs.sync.outputs.channel }}, build ${{ github.run_number }})
           body_path: notes/release-body.md
           files: release-assets/*.zip
           draft: false
-          prerelease: true
+          # Official rule: beta/test channels are pre-releases; production is a full release.
+          prerelease: ${{ needs.sync.outputs.is_prerelease == 'true' }}
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
